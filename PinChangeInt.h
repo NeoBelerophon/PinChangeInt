@@ -242,21 +242,58 @@ protected:
 	class PCintPin {
 	public:
 		PCintPin() :
-		PCintFunc((PCIntvoidFuncPtr)NULL),
+		_function((PCIntvoidFuncPtr)NULL),
+		_object(0),
 		mode(0) {}
-		PCIntvoidFuncPtr PCintFunc;
+
+
+		void call(void) {
+	       if (_function) {
+	          _function();
+	        } else if (_object) {
+	          _membercaller(_object, _member);
+	        }
+		}
+
+		void attach(PCIntvoidFuncPtr function){
+			_function = function;
+		}
+
+		template<typename T>
+		void attach(T *object, void (T::*member)(void)) {
+		        _object = static_cast<void*>(object);
+		        memcpy(_member, (char*)&member, sizeof(member));
+		        _membercaller = &PCintPin::membercaller<T>;
+		        _function = 0;
+
+		}
+
 		uint8_t 	mode;
 		uint8_t		mask;
-		uint8_t arduinoPin;
+		uint8_t 	arduinoPin;
 		PCintPin* next;
+	private:
+		  template<typename T>
+		    static void membercaller(void *object, char *member) {
+		        T* o = static_cast<T*>(object);
+		        void (T::*m)(void);
+		        memcpy((char*)&m, member, sizeof(m));
+		        (o->*m)();
+		    }
+
+		  void (*_function)(void);
+		  void *_object;
+		  char _member[16];
+		  void (*_membercaller)(void*, char*);
+
 	};
-	void 		enable(PCintPin* pin, PCIntvoidFuncPtr userFunc, uint8_t mode);
+	void 		enable(PCintPin* pin);
 	int8_t		addPin(uint8_t arduinoPin,PCIntvoidFuncPtr userFunc, uint8_t mode);
 	volatile	uint8_t&		portPCMask;
 	const		uint8_t			PCICRbit;
 	volatile	uint8_t			portRisingPins;
 	volatile	uint8_t			portFallingPins;
-	volatile uint8_t		lastPinView;
+	volatile 	uint8_t		lastPinView;
 	PCintPin*	firstPin;
 };
 
@@ -387,11 +424,10 @@ static PCintPort *lookupPortNumToPort( int portNum ) {
 }
 
 
-void PCintPort::enable(PCintPin* p, PCIntvoidFuncPtr userFunc, uint8_t mode) {
+void PCintPort::enable(PCintPin* p) {
 	// Enable the pin for interrupts by adding to the PCMSKx register.
 	// ...The final steps; at this point the interrupt is enabled on this pin.
-	p->mode=mode;
-	p->PCintFunc=userFunc;
+
 #ifndef NO_PORTJ_PINCHANGES
 	// A big shout out to jrhelbert for this fix! Thanks!!!
 	if ((p->arduinoPin == 14) || (p->arduinoPin == 15)) {
@@ -407,6 +443,56 @@ void PCintPort::enable(PCintPin* p, PCIntvoidFuncPtr userFunc, uint8_t mode) {
 	if ((p->mode == FALLING) || (p->mode == CHANGE)) portFallingPins |= p->mask;
 	PCICR |= PCICRbit;
 }
+template <typename T>
+int8_t PCintPort::addPin(uint8_t arduinoPin,T *object, void (T::*member)(void), mode )
+{
+	PCintPin* tmp;
+
+	tmp=firstPin;
+
+	if (firstPin != NULL) {
+			do {
+				if (tmp->arduinoPin == arduinoPin)
+				{
+					tmp->attach(object, member);
+					tmp->mode = mode;
+					enable(tmp); return(0); }
+				if (tmp->next == NULL) break;
+				tmp=tmp->next;
+			} while (true);
+	}
+
+	// Create pin p:  fill in the data.
+	PCintPin* p=new PCintPin;
+	if (p == NULL) return(-1);
+	p->arduinoPin=arduinoPin;
+	p->mode = mode;
+	p->next=NULL;
+	p->mask = digitalPinToBitMask(arduinoPin); // the mask
+	p->mode=mode;
+	p->attach(object, member);
+
+	if (firstPin == NULL) firstPin=p;
+	else tmp->next=p; // NOTE that tmp cannot be NULL.
+
+#ifdef DEBUG
+	Serial.print("addPin. pin given: "); Serial.print(arduinoPin, DEC);
+	int addr = (int) p;
+	Serial.print(" instance addr: "); Serial.println(addr, HEX);
+	Serial.print("userFunc addr: "); Serial.println((int)p->PCintFunc, HEX);
+#endif
+
+	enable(p);
+#ifdef DEBUG
+	Serial.print("addPin. pin given: "); Serial.print(arduinoPin, DEC), Serial.print (" pin stored: ");
+	int addr = (int) p;
+	Serial.print(" instance addr: "); Serial.println(addr, HEX);
+#endif
+	return(1);
+
+
+
+}
 
 int8_t PCintPort::addPin(uint8_t arduinoPin, PCIntvoidFuncPtr userFunc, uint8_t mode)
 {
@@ -416,7 +502,11 @@ int8_t PCintPort::addPin(uint8_t arduinoPin, PCIntvoidFuncPtr userFunc, uint8_t 
 	// Add to linked list, starting with firstPin. If pin already exists, just enable.
 	if (firstPin != NULL) {
 		do {
-			if (tmp->arduinoPin == arduinoPin) { enable(tmp, userFunc, mode); return(0); }
+			if (tmp->arduinoPin == arduinoPin)
+			{
+				tmp->attach(userFunc);
+				tmp->mode = mode;
+				enable(tmp); return(0); }
 			if (tmp->next == NULL) break;
 			tmp=tmp->next;
 		} while (true);
@@ -429,6 +519,8 @@ int8_t PCintPort::addPin(uint8_t arduinoPin, PCIntvoidFuncPtr userFunc, uint8_t 
 	p->mode = mode;
 	p->next=NULL;
 	p->mask = digitalPinToBitMask(arduinoPin); // the mask
+	p->mode=mode;
+	p->attach(userFunc);
 
 	if (firstPin == NULL) firstPin=p;
 	else tmp->next=p; // NOTE that tmp cannot be NULL.
@@ -440,7 +532,7 @@ int8_t PCintPort::addPin(uint8_t arduinoPin, PCIntvoidFuncPtr userFunc, uint8_t 
 	Serial.print("userFunc addr: "); Serial.println((int)p->PCintFunc, HEX);
 #endif
 
-	enable(p, userFunc, mode);
+	enable(p);
 #ifdef DEBUG
 	Serial.print("addPin. pin given: "); Serial.print(arduinoPin, DEC), Serial.print (" pin stored: ");
 	int addr = (int) p;
@@ -467,6 +559,27 @@ int8_t PCintPort::attachInterrupt(uint8_t arduinoPin, PCIntvoidFuncPtr userFunc,
 #endif
 	// map pin to PCIR register
 	return(port->addPin(arduinoPin,userFunc,mode));
+}
+
+/*
+ * attach an interrupt to a specific pin using pin change interrupts.
+ */
+template <typename T>
+int8_t PCintPort::attachInterrupt(uint8_t arduinoPin, T *object, void (T::*member)(void), int mode)
+{
+	PCintPort *port;
+	uint8_t portNum = digitalPinToPort(arduinoPin);
+	if ((portNum == NOT_A_PORT) || (userFunc == NULL)) return(-1);
+
+	port=lookupPortNumToPort(portNum);
+	// Added by GreyGnome... must set the initial value of lastPinView for it to be correct on the 1st interrupt.
+	// ...but even then, how do you define "correct"?  Ultimately, the user must specify (not provisioned for yet).
+	port->lastPinView=port->portInputReg;
+#ifdef DEBUG
+	Serial.print("attachInterrupt- pin: "); Serial.println(arduinoPin, DEC);
+#endif
+	// map pin to PCIR register
+	return(port->addPin(arduinoPin,object, member,mode));
 }
 
 void PCintPort::detachInterrupt(uint8_t arduinoPin)
@@ -556,7 +669,7 @@ void PCintPort::PCint() {
 				PCintPort::s_pmask=p->mask;
 				PCintPort::s_changedPins=changedPins;
 				#endif
-				p->PCintFunc();
+				p->call();
 			}
 			p=p->next;
 		}
